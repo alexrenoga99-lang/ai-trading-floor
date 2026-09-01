@@ -13,14 +13,14 @@ Uso:
     export CAPITAL_IDENTIFIER="tu_email@ejemplo.com"
     export CAPITAL_API_PASSWORD="tu_password_de_api"
 
-    python scripts/fetch_data_capitalcom.py --epic NAS100 --resolution HOUR \
-        --start 2022-01-01 --end 2024-12-31 --out data/nas100/nas100_1h.csv
+    python scripts/fetch_data_capitalcom.py --epic US100 --resolution HOUR \
+        --start 2024-01-01 --end 2024-12-31 --out data/nas100/nas100_1h.csv
 
-    python scripts/fetch_data_capitalcom.py --epic NAS100 --resolution MINUTE_5 \
+    python scripts/fetch_data_capitalcom.py --epic US100 --resolution MINUTE_5 \
         --start 2024-01-01 --end 2024-12-31 --out data/nas100/nas100_5m.csv
 
     python scripts/fetch_data_capitalcom.py --epic GOLD --resolution HOUR \
-        --start 2022-01-01 --end 2024-12-31 --out data/xauusd/xauusd_1h.csv
+        --start 2024-01-01 --end 2024-12-31 --out data/xauusd/xauusd_1h.csv
 
 Nota: el epic exacto de NAS100 y del oro puede variar (ej. "NAS100", "US100",
 "GOLD", "XAUUSD"). Si un epic falla, usa --search para listar los epics
@@ -35,6 +35,9 @@ Limites reales de la API de Capital.com:
     - Este script pagina automaticamente en bloques de 1 dia para evitar
       el error "error.invalid.max.daterange". Para rangos largos (varios
       anios) esto implica cientos de requests y puede tardar varios minutos.
+    - Tras el login es necesario activar explicitamente la cuenta con la
+      que se va a operar via PUT /session con su accountId; sin este paso
+      endpoints como /prices pueden devolver 404 error.prices.not-found.
 """
 import argparse
 import os
@@ -62,9 +65,11 @@ MAX_DATERANGE = timedelta(days=1)
 
 def create_session(api_key: str, identifier: str, password: str) -> dict:
     """
-    Autentica contra Capital.com y devuelve los tokens necesarios
-    para las siguientes requests (CST y X-SECURITY-TOKEN), junto
-    con la lista de cuentas disponibles.
+    Autentica contra Capital.com, devuelve los tokens necesarios
+    (CST y X-SECURITY-TOKEN), y activa explicitamente la cuenta
+    preferida via PUT /session (requerido para que endpoints como
+    /prices funcionen correctamente; sin este paso se puede obtener
+    404 error.prices.not-found aunque el epic exista).
     """
     url = f"{BASE_URL}/session"
     headers = {"X-CAP-API-KEY": api_key, "Content-Type": "application/json"}
@@ -82,10 +87,41 @@ def create_session(api_key: str, identifier: str, password: str) -> dict:
     if not cst or not security_token:
         raise RuntimeError("La respuesta no incluyo los tokens CST / X-SECURITY-TOKEN esperados.")
 
+    accounts = data.get("accounts", [])
+
+    # Activar explicitamente la cuenta preferida (o la primera disponible)
+    # llamando PUT /session con su accountId.
+    account_id = None
+    for acc in accounts:
+        if acc.get("preferred"):
+            account_id = acc.get("accountId")
+            break
+    if not account_id and accounts:
+        account_id = accounts[0].get("accountId")
+
+    if account_id:
+        switch_headers = {
+            "X-CAP-API-KEY": api_key,
+            "CST": cst,
+            "X-SECURITY-TOKEN": security_token,
+            "Content-Type": "application/json",
+        }
+        switch_response = requests.put(
+            url, headers=switch_headers, json={"accountId": account_id}, timeout=30
+        )
+        if switch_response.status_code != 200:
+            raise RuntimeError(
+                f"Error activando cuenta ({switch_response.status_code}): {switch_response.text}"
+            )
+        # PUT /session tambien puede refrescar los tokens; los actualizamos por seguridad
+        cst = switch_response.headers.get("CST", cst)
+        security_token = switch_response.headers.get("X-SECURITY-TOKEN", security_token)
+
     return {
         "cst": cst,
         "security_token": security_token,
-        "accounts": data.get("accounts", []),
+        "accounts": accounts,
+        "active_account_id": account_id,
     }
 
 
@@ -185,6 +221,7 @@ def main():
     print("Autenticando con Capital.com...")
     session = create_session(api_key, identifier, password)
     print(f"Sesion creada. Cuentas disponibles: {session['accounts']}")
+    print(f"Cuenta activa (usada para /prices): {session['active_account_id']}")
 
     if args.search:
         print(f"Buscando epics que coincidan con '{args.search}'...")
