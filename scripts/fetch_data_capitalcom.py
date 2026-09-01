@@ -35,9 +35,10 @@ Limites reales de la API de Capital.com:
     - Este script pagina automaticamente en bloques de 1 dia para evitar
       el error "error.invalid.max.daterange". Para rangos largos (varios
       anios) esto implica cientos de requests y puede tardar varios minutos.
-    - Tras el login es necesario activar explicitamente la cuenta con la
-      que se va a operar via PUT /session con su accountId; sin este paso
-      endpoints como /prices pueden devolver 404 error.prices.not-found.
+    - Tras el login se intenta activar explicitamente la cuenta con la que
+      se va a operar via PUT /session con su accountId. Si la cuenta ya
+      estaba activa por defecto, la API devuelve
+      error.not-different.accountId, lo cual se ignora (no es un error real).
 """
 import argparse
 import os
@@ -66,10 +67,9 @@ MAX_DATERANGE = timedelta(days=1)
 def create_session(api_key: str, identifier: str, password: str) -> dict:
     """
     Autentica contra Capital.com, devuelve los tokens necesarios
-    (CST y X-SECURITY-TOKEN), y activa explicitamente la cuenta
-    preferida via PUT /session (requerido para que endpoints como
-    /prices funcionen correctamente; sin este paso se puede obtener
-    404 error.prices.not-found aunque el epic exista).
+    (CST y X-SECURITY-TOKEN), e intenta activar explicitamente la cuenta
+    preferida via PUT /session. Si la cuenta ya estaba activa por defecto
+    (error.not-different.accountId), se ignora ese error y se continua.
     """
     url = f"{BASE_URL}/session"
     headers = {"X-CAP-API-KEY": api_key, "Content-Type": "application/json"}
@@ -89,7 +89,7 @@ def create_session(api_key: str, identifier: str, password: str) -> dict:
 
     accounts = data.get("accounts", [])
 
-    # Activar explicitamente la cuenta preferida (o la primera disponible)
+    # Intentar activar explicitamente la cuenta preferida (o la primera disponible)
     # llamando PUT /session con su accountId.
     account_id = None
     for acc in accounts:
@@ -109,13 +109,20 @@ def create_session(api_key: str, identifier: str, password: str) -> dict:
         switch_response = requests.put(
             url, headers=switch_headers, json={"accountId": account_id}, timeout=30
         )
-        if switch_response.status_code != 200:
-            raise RuntimeError(
-                f"Error activando cuenta ({switch_response.status_code}): {switch_response.text}"
-            )
-        # PUT /session tambien puede refrescar los tokens; los actualizamos por seguridad
-        cst = switch_response.headers.get("CST", cst)
-        security_token = switch_response.headers.get("X-SECURITY-TOKEN", security_token)
+        if switch_response.status_code == 200:
+            # PUT /session tambien puede refrescar los tokens; los actualizamos por seguridad
+            cst = switch_response.headers.get("CST", cst)
+            security_token = switch_response.headers.get("X-SECURITY-TOKEN", security_token)
+        else:
+            body_text = switch_response.text
+            if "error.not-different.accountId" in body_text:
+                # La cuenta ya estaba activa por defecto tras el login normal.
+                # No es un error real, se puede continuar sin problema.
+                pass
+            else:
+                raise RuntimeError(
+                    f"Error activando cuenta ({switch_response.status_code}): {body_text}"
+                )
 
     return {
         "cst": cst,
