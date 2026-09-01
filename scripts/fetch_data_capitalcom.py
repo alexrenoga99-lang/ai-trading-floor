@@ -27,7 +27,10 @@ Nota: el epic exacto de NAS100 y del oro puede variar (ej. "NAS100", "US100",
 disponibles que coincidan con un texto.
 
 Resoluciones soportadas: MINUTE, MINUTE_5, MINUTE_15, MINUTE_30, HOUR, HOUR_4, DAY
-Limite de la API: 1000 velas por request. Este script pagina automaticamente.
+Limite de la API: 1000 velas por request. Este script pagina automaticamente
+por bloques acotados de tiempo (from/to) para evitar el error
+"error.invalid.max.daterange" que ocurre si se pide un rango muy amplio
+en una sola consulta (especialmente en resoluciones pequenas como MINUTE_5).
 """
 import argparse
 import os
@@ -102,7 +105,9 @@ def search_epics(api_key: str, cst: str, security_token: str, search_term: str) 
 def fetch_candles(api_key: str, cst: str, security_token: str, epic: str,
                    resolution: str, start: datetime, end: datetime) -> list:
     """
-    Pagina requests de 1000 velas hasta cubrir [start, end].
+    Pagina requests de 1000 velas hasta cubrir [start, end], acotando
+    cada request a un bloque de tiempo que no exceda MAX_CANDLES_PER_REQUEST
+    velas (evita el error 'error.invalid.max.daterange' de la API).
     Devuelve una lista de dicts con timestamp, open, high, low, close, volume.
     """
     headers = {
@@ -115,11 +120,16 @@ def fetch_candles(api_key: str, cst: str, security_token: str, epic: str,
     seconds_per_candle = RESOLUTION_SECONDS[resolution]
 
     while current_start < end:
+        # Acotar el 'to' de este request a lo que cabe en MAX_CANDLES_PER_REQUEST,
+        # sin pasarse del 'end' final solicitado por el usuario.
+        chunk_end = current_start + timedelta(seconds=seconds_per_candle * MAX_CANDLES_PER_REQUEST)
+        request_to = min(chunk_end, end)
+
         url = f"{BASE_URL}/prices/{epic}"
         params = {
             "resolution": resolution,
             "from": current_start.strftime("%Y-%m-%dT%H:%M:%S"),
-            "to": end.strftime("%Y-%m-%dT%H:%M:%S"),
+            "to": request_to.strftime("%Y-%m-%dT%H:%M:%S"),
             "max": MAX_CANDLES_PER_REQUEST,
         }
         response = requests.get(url, headers=headers, params=params, timeout=30)
@@ -128,8 +138,12 @@ def fetch_candles(api_key: str, cst: str, security_token: str, epic: str,
             raise RuntimeError(f"Error obteniendo precios ({response.status_code}): {response.text}")
 
         prices = response.json().get("prices", [])
+
         if not prices:
-            break
+            # avanzar el bloque igual para no quedar atascado si un tramo viene vacio
+            current_start = request_to
+            time.sleep(0.3)
+            continue
 
         for p in prices:
             all_candles.append({
@@ -146,11 +160,8 @@ def fetch_candles(api_key: str, cst: str, security_token: str, epic: str,
         next_start = last_time + timedelta(seconds=seconds_per_candle)
 
         if next_start <= current_start:
-            break
+            next_start = request_to  # evitar bucle infinito si la API no avanza
         current_start = next_start
-
-        if len(prices) < MAX_CANDLES_PER_REQUEST:
-            break
 
         time.sleep(0.3)  # evitar rate limiting
 
