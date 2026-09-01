@@ -1,0 +1,46 @@
+{
+  "strategy_id": "nas100_ob_choch_v1",
+  "name": "Order Block + CHoCH/BOS Estructural (NAS100)",
+  "instrument": "NAS100",
+  "instrument_alt": ["XAUUSD"],
+  "session_window": {
+    "start": "00:00",
+    "end": "23:59",
+    "timezone": "America/New_York",
+    "notes": "Corre las 24 horas del día, sin filtro de sesión. Todas las ventanas horarias son válidas para buscar setups."
+  },
+  "timeframes": {
+    "structure_tf": ["1H", "4H"],
+    "trigger_tf": ["1m", "5m"]
+  },
+  "entry_rules": [
+    "PASO 1 (Estructura, TF 1H/4H): Identificar un Order Block (OB) como la última vela bajista antes de un impulso alcista fuerte (OB alcista) o la última vela alcista antes de un impulso bajista fuerte (OB bajista).",
+    "PASO 2 (Estructura, TF 1H/4H): Confirmar que el impulso posterior al OB generó un BOS (ruptura de un swing high/low a favor de la tendencia) o un CHoCH (cambio de carácter, ruptura en contra de la estructura previa).",
+    "PASO 3 (Zona de interés): Marcar la zona de precio del OB (rango completo de la vela) como zona de entrada potencial. SOLO es válido si el OB está VIRGEN (el precio no ha regresado a mitigar esa zona en ningún momento previo desde que se formó).",
+    "PASO 4 (Espera de retorno): Esperar a que el precio regrese por PRIMERA VEZ hacia la zona del OB virgen marcada en el TF de estructura. Si el precio ya tocó esa zona antes, el OB queda invalidado y se descarta (no se opera OBs mitigados).",
+    "PASO 5 (Confirmación de entrada, TF 1m/5m): Dentro de la zona del OB virgen, requerir AMBAS confirmaciones antes de entrar: (a) una vela de rechazo (envolvente, pin bar o martillo/estrella fugaz) Y (b) un mini-CHoCH en el TF de entrada (1m/5m) que confirme el rebote a favor de la dirección del BOS/CHoCH original.",
+    "PASO 6 (Entrada): Entrar al cierre de la vela de confirmación en el TF de entrada, una vez cumplidas ambas condiciones del PASO 5."
+  ],
+  "stop_rule": "Extremo opuesto exacto del Order Block (si OB alcista: low de la vela del OB; si OB bajista: high de la vela del OB).",
+  "stop_points_estimate": "variable, calculado por trade según el tamaño real del OB en el momento de la señal",
+  "position_size_formula": "risk_amount_usd / (stop_points_real * point_value)",
+  "target_rule": "Objetivo fijo en 3R (3 veces el stop en puntos), medido desde el precio de entrada en la dirección del trade. Cierre TOTAL de la posición al alcanzar 3:1. No se toman parciales.",
+  "reward_to_risk": {
+    "fixed": 3.0,
+    "flexible": false,
+    "notes": "RR fijo en 3:1. El análisis de ajustar a niveles de liquidez reales se deja para una v2 posterior si el backtest de v1 lo justifica."
+  },
+  "trade_management": {
+    "breakeven_rule": "Mover el stop a Break Even (precio de entrada) apenas se forme un CHoCH/BOS menor a favor del trade en el MISMO timeframe de entrada (1m/5m), inmediatamente al cierre de la vela que confirma ese quiebre menor.",
+    "notes": "Esto protege la operación ante un retroceso después de la entrada, antes de alcanzar el target final de 3:1."
+  },
+  "risk_per_trade_pct": 1.0,
+  "risk_amount_usd": 100,
+  "account_size": 10000,
+  "filters": [
+    "El OB debe estar precedido por un impulso claro (evitar OBs dentro de rangos laterales sin desplazamiento fuerte).",
+    "OBLIGATORIO: solo se opera el OB si está virgen (nunca antes mitigado). Un solo toque previo invalida la zona para siempre."
+  ],
+  "max_trades_per_day": 3,
+  "notes": "Estrategia 1 (única por ahora, en espera de futuras estrategias 2 y 3 para portafolio). Basada en Smart Money Concepts (Order Blocks vírgenes + BOS/CHoCH multi-timeframe), corre 24h, RR fijo 3:1, gestión de BE por mini-quiebre en TF de entrada."
+}
