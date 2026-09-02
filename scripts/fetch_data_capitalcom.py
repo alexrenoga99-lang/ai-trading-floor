@@ -43,7 +43,7 @@ Limites reales de la API de Capital.com:
 import argparse
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import requests
@@ -64,6 +64,125 @@ MAX_CANDLES_PER_REQUEST = 1000
 MAX_DATERANGE = timedelta(days=1)
 
 
+def build_epic_candidates(epic: str) -> list[str]:
+    """Genera aliases reales de un epic para Capital.com usando nombres comunes."""
+    base = (epic or "").strip().upper().replace(" ", "").replace("-", "").replace("_", "")
+    aliases = {
+        "US100": ["US100", "NAS100", "NASDAQ100", "NASDAQ", "USTEC", "NASD100", "NS100"],
+        "NAS100": ["NAS100", "US100", "NASDAQ100", "NASDAQ", "USTEC", "NASD100", "NS100"],
+        "XAUUSD": ["XAUUSD", "GOLD", "XAUUSD", "XAU", "GOLDUSD"],
+        "GOLD": ["GOLD", "XAUUSD", "XAUUSD", "XAU", "GOLDUSD"],
+        "US30": ["US30", "DOW", "DJI", "DOWJONES"],
+        "EURUSD": ["EURUSD", "EURUSD"],
+    }
+
+    direct = [base]
+    if base in aliases:
+        direct = aliases[base]
+    elif base.startswith("US") and base.endswith("00"):
+        direct = [base, "NAS" + base[2:], "NASDAQ" + base[2:]]
+    elif base.startswith("NAS"):
+        direct = [base, base.replace("NAS", "US"), "NASDAQ" + base[3:]]
+
+    ordered = []
+    seen = set()
+    for value in direct + [epic.upper(), epic, base]:
+        key = value.strip().upper().replace(" ", "").replace("-", "").replace("_", "")
+        if key and key not in seen:
+            ordered.append(value)
+            seen.add(key)
+    return ordered
+
+
+def resolve_epic_aliases(api_key: str, cst: str, security_token: str, epic: str,
+                        search_fn=None) -> str:
+    """Devuelve un epic valido para /prices/{epic} intentando aliases conocidos y busqueda API."""
+    candidates = []
+    for candidate in build_epic_candidates(epic):
+        candidates.append(candidate)
+
+    search_results = []
+    search_impl = search_fn or search_epics
+    try:
+        search_results = search_impl(api_key, cst, security_token, epic)
+    except RuntimeError:
+        search_results = []
+
+    normalized_search = []
+    for market in search_results:
+        market_epic = market.get("epic")
+        if market_epic and market_epic not in candidates:
+            candidates.append(market_epic)
+        if market_epic:
+            normalized_search.append(market_epic)
+
+    if normalized_search:
+        return normalized_search[0]
+
+    # Si no hay resultados de busqueda de la API, se prueba el epic pedido y aliases conocidos.
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            probe = requests.get(
+                f"{BASE_URL}/prices/{candidate}",
+                headers={
+                    "X-CAP-API-KEY": api_key,
+                    "CST": cst,
+                    "X-SECURITY-TOKEN": security_token,
+                },
+                params={
+                    "resolution": "HOUR",
+                    "from": (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"),
+                    "to": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+                    "max": 1,
+                },
+                timeout=20,
+            )
+            if probe.status_code == 200:
+                return candidate
+        except requests.RequestException:
+            pass
+
+    # Si ninguno responde, devolvemos el nombre original y deja que el fetch falle con un
+    # mensaje claro de error si realmente no existe en la cuenta concreta.
+    return epic
+
+
+def _request_with_backoff(method: str, url: str, *, headers: dict, json: dict | None = None, params: dict | None = None, timeout: int = 30, max_retries: int = 3) -> requests.Response:
+    """Hace reintentos controlados cuando Capital.com responde 429 por rate limit."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            if method == "GET":
+                response = requests.get(url, headers=headers, params=params, timeout=timeout)
+            elif method == "POST":
+                response = requests.post(url, headers=headers, json=json, timeout=timeout)
+            elif method == "PUT":
+                response = requests.put(url, headers=headers, json=json, timeout=timeout)
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+            continue
+
+        if response.status_code == 429:
+            last_error = RuntimeError(f"Capital.com rate limit ({response.status_code}): {response.text}")
+            if attempt == max_retries - 1:
+                raise RuntimeError(f"Error de autenticacion Capital.com ({response.status_code}): {response.text}")
+            time.sleep(2 ** (attempt + 1))
+            continue
+
+        return response
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Capital.com no devolvio respuesta valida.")
+
+
 def create_session(api_key: str, identifier: str, password: str) -> dict:
     """
     Autentica contra Capital.com, devuelve los tokens necesarios
@@ -75,7 +194,7 @@ def create_session(api_key: str, identifier: str, password: str) -> dict:
     headers = {"X-CAP-API-KEY": api_key, "Content-Type": "application/json"}
     body = {"identifier": identifier, "password": password, "encryptedPassword": False}
 
-    response = requests.post(url, headers=headers, json=body, timeout=30)
+    response = _request_with_backoff("POST", url, headers=headers, json=body, timeout=30)
 
     if response.status_code != 200:
         raise RuntimeError(f"Error de autenticacion Capital.com ({response.status_code}): {response.text}")
@@ -106,8 +225,12 @@ def create_session(api_key: str, identifier: str, password: str) -> dict:
             "X-SECURITY-TOKEN": security_token,
             "Content-Type": "application/json",
         }
-        switch_response = requests.put(
-            url, headers=switch_headers, json={"accountId": account_id}, timeout=30
+        switch_response = _request_with_backoff(
+            "PUT",
+            url,
+            headers=switch_headers,
+            json={"accountId": account_id},
+            timeout=30,
         )
         if switch_response.status_code == 200:
             # PUT /session tambien puede refrescar los tokens; los actualizamos por seguridad
@@ -141,7 +264,7 @@ def search_epics(api_key: str, cst: str, security_token: str, search_term: str) 
         "X-SECURITY-TOKEN": security_token,
     }
     params = {"searchTerm": search_term}
-    response = requests.get(url, headers=headers, params=params, timeout=30)
+    response = _request_with_backoff("GET", url, headers=headers, params=params, timeout=30)
 
     if response.status_code != 200:
         raise RuntimeError(f"Error buscando epics ({response.status_code}): {response.text}")
@@ -243,13 +366,17 @@ def main():
     if args.resolution not in RESOLUTION_SECONDS:
         raise SystemExit(f"Resolucion no soportada: {args.resolution}. Usa: {list(RESOLUTION_SECONDS.keys())}")
 
+    resolved_epic = resolve_epic_aliases(api_key, session["cst"], session["security_token"], args.epic)
+    if resolved_epic != args.epic:
+        print(f"Epic resolutio: {args.epic} -> {resolved_epic}")
+
     start_dt = datetime.strptime(args.start, "%Y-%m-%d")
     end_dt = datetime.strptime(args.end, "%Y-%m-%d")
 
-    print(f"Descargando {args.epic} [{args.resolution}] desde {args.start} hasta {args.end}...")
+    print(f"Descargando {resolved_epic} [{args.resolution}] desde {args.start} hasta {args.end}...")
     print("Nota: la API limita cada request a 1 dia, esto puede tardar varios minutos para rangos largos.")
     candles = fetch_candles(api_key, session["cst"], session["security_token"],
-                             args.epic, args.resolution, start_dt, end_dt)
+                             resolved_epic, args.resolution, start_dt, end_dt)
 
     if not candles:
         raise SystemExit("No se descargaron velas. Verifica el epic, resolucion y fechas (usa --search para explorar).")

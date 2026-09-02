@@ -7,18 +7,61 @@ Ejecutar con:
     streamlit run dashboard/app.py
 """
 import json
+import os
+import time
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
-from engine.backtester import load_ohlcv, run_backtest
-from engine.rules_guard import evaluate as rules_guard_evaluate
-from engine.structure import find_swings, detect_bos_choch, find_order_blocks
+from live.capital_live import fetch_recent_candles
+from live.telegram_router import send_signal_alert
+from live.watcher import build_signal_from_recent_candles
+
+TIMEFRAME_OPTIONS = {
+    "1m": {"resolution": "MINUTE", "hours": 12},
+    "5m": {"resolution": "MINUTE_5", "hours": 24},
+    "15m": {"resolution": "MINUTE_15", "hours": 48},
+    "1h": {"resolution": "HOUR", "hours": 72},
+    "4h": {"resolution": "HOUR_4", "hours": 168},
+    "1d": {"resolution": "DAY", "hours": 720},
+}
+
+
+def _ensure_env_loaded() -> None:
+    """Carga .env local para que el dashboard funcione sin un source manual."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        return
+    except ModuleNotFoundError:
+        pass
+
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+_ensure_env_loaded()
 
 st.set_page_config(page_title="AI Trading Floor", layout="wide")
 st.title("AI Trading Floor - Dashboard")
+st.caption("Actualización en tiempo real: cada 15 segundos para evitar rate limit de Capital.com")
+st_autorefresh(interval=15000, key="live_refresh")
 
 # --- Selector de estrategia ---
 strategy_files = list(Path("strategies").glob("*.json"))
@@ -30,87 +73,96 @@ with open(f"strategies/{selected}.json") as f:
 
 st.sidebar.json(strategy, expanded=False)
 
-structure_path = st.sidebar.text_input("CSV Estructura (1H/4H)", "data/nas100/nas100_1h.csv")
-trigger_path = st.sidebar.text_input("CSV Gatillo (1m/5m)", "data/nas100/nas100_5m.csv")
+st.sidebar.caption("Telegram alert routing")
+st.sidebar.write(f"Bot token: {'OK' if os.getenv('TELEGRAM_BOT_TOKEN') else 'missing'}")
+st.sidebar.write(f"Chat ID: {'OK' if os.getenv('TELEGRAM_CHAT_ID') else 'missing'}")
+if st.sidebar.button("Enviar alerta de prueba"):
+    sample_signal = {
+        "strategy_id": strategy["strategy_id"],
+        "direction": "bullish",
+        "entry_price": 22300.5,
+        "stop_price": 22280.0,
+        "target_price": 22360.0,
+        "position_size": 0.75,
+        "timestamp": "now",
+    }
+    try:
+        result = send_signal_alert(sample_signal)
+        st.sidebar.success(f"Alerta enviada: {result.get('ok', True)}")
+    except Exception as exc:
+        st.sidebar.error(f"Telegram no configurado: {exc}")
 
-tab1, tab2, tab3 = st.tabs(["Grafico + Order Blocks", "Backtest", "Rules-Guard"])
+st.sidebar.caption("Capital.com live")
+capital_epic = st.sidebar.text_input("Epic live", "US100")
+selected_timeframe = st.sidebar.selectbox("Timeframe", list(TIMEFRAME_OPTIONS.keys()), index=3)
+selected_resolution = TIMEFRAME_OPTIONS[selected_timeframe]["resolution"]
+selected_hours = TIMEFRAME_OPTIONS[selected_timeframe]["hours"]
 
-# --- TAB 1: Grafico de velas con Order Blocks ---
-with tab1:
-    if Path(structure_path).exists():
-        df = load_ohlcv(structure_path)
-        df = find_swings(df)
-        df = detect_bos_choch(df)
-        order_blocks = find_order_blocks(df)
+should_refresh = (
+    "live_data" not in st.session_state
+    or st.session_state.get("live_timeframe") != selected_timeframe
+    or (time.time() - st.session_state.get("live_last_fetch", 0)) >= 15
+)
 
-        fig = go.Figure(data=[go.Candlestick(
-            x=df["timestamp"], open=df["open"], high=df["high"],
-            low=df["low"], close=df["close"], name="Precio"
-        )])
+if should_refresh:
+    try:
+        live_data = fetch_recent_candles(
+            epic=capital_epic,
+            resolution=selected_resolution,
+            hours=selected_hours,
+            max_points=200,
+        )
+        st.session_state["live_data"] = live_data
+        st.session_state["live_data_error"] = None
+        st.session_state["live_last_fetch"] = time.time()
+        st.session_state["live_timeframe"] = selected_timeframe
+    except Exception as exc:
+        st.session_state["live_data_error"] = str(exc)
 
-        for ob in order_blocks:
-            color = "rgba(0,255,0,0.2)" if ob["direction"] == "bullish" else "rgba(255,0,0,0.2)"
-            fig.add_shape(
-                type="rect",
-                x0=df["timestamp"].iloc[ob["index"]], x1=df["timestamp"].iloc[-1],
-                y0=ob["low"], y1=ob["high"],
-                fillcolor=color, line=dict(width=0),
-            )
+live_data = st.session_state.get("live_data")
 
-        fig.update_layout(height=600, xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"{len(order_blocks)} Order Blocks detectados en el TF de estructura.")
+st.subheader(f"Precio live · {selected_timeframe}")
+if live_data:
+    df = live_data["df"]
+    signal = build_signal_from_recent_candles(strategy, df, timeframe=selected_timeframe)
+    fig = go.Figure(data=[go.Candlestick(
+        x=df["timestamp"],
+        open=df["open"],
+        high=df["high"],
+        low=df["low"],
+        close=df["close"],
+        name=live_data["epic"],
+    )])
+
+    if signal:
+        last_ts = df["timestamp"].iloc[-1]
+        fig.add_vline(x=last_ts, line_dash="dash", line_color="#ff9f1c", line_width=2)
+        fig.add_hline(y=signal["stop_price"], line_dash="dot", line_color="#d32f2f", line_width=1)
+        fig.add_hline(y=signal["target_price"], line_dash="dot", line_color="#2e7d32", line_width=1)
+        fig.add_trace(go.Scatter(
+            x=[last_ts],
+            y=[signal["entry_price"]],
+            mode="markers+text",
+            name="Alerta estrategia",
+            text=["ALERTA"],
+            textposition="top center",
+            marker=dict(color="#ff9f1c", size=12, symbol="diamond"),
+        ))
+        st.caption(
+            f"Señal: {signal['direction']} | timeframe={signal.get('timeframe')} | entrada {signal['entry_price']} | stop {signal['stop_price']} | target {signal['target_price']}"
+        )
+
+    fig.update_layout(
+        height=500,
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis_rangeslider_visible=False,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.metric("Último cierre del timeframe", f"{live_data['current_price']:.2f}")
+    st.caption("Importante: el precio del watcher y del dashboard se basan en el último cierre del timeframe elegido, no en el último tick instantáneo del mercado.")
+else:
+    if st.session_state.get("live_data_error"):
+        st.warning(f"No se pudo cargar Capital.com live: {st.session_state['live_data_error']}")
     else:
-        st.warning(f"No se encontro el archivo {structure_path}. Descarga los datos primero con scripts/fetch_data.py.")
-
-# --- TAB 2: Backtest ---
-with tab2:
-    if st.button("Correr Backtest", type="primary"):
-        if Path(structure_path).exists() and Path(trigger_path).exists():
-            structure_df = load_ohlcv(structure_path)
-            trigger_df = load_ohlcv(trigger_path)
-            with st.spinner("Ejecutando backtest..."):
-                result = run_backtest(strategy, structure_df, trigger_df)
-
-            st.session_state["backtest_result"] = result
-        else:
-            st.error("Faltan los archivos de datos. Verifica las rutas en la barra lateral.")
-
-    if "backtest_result" in st.session_state:
-        result = st.session_state["backtest_result"]
-        metrics = result["metrics"]
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Win Rate", f"{metrics.get('win_rate', 0)}%")
-        col2.metric("Expectancy", f"${metrics.get('expectancy_usd', 0)}")
-        col3.metric("Max Drawdown", f"${metrics.get('max_drawdown_usd', 0)}")
-        col4.metric("Sharpe", f"{metrics.get('sharpe', 0)}")
-
-        if not result["daily_pnl"].empty:
-            equity = 10000 + result["daily_pnl"]["pnl_usd"].cumsum()
-            fig_eq = go.Figure(go.Scatter(x=result["daily_pnl"]["date"], y=equity, mode="lines"))
-            fig_eq.update_layout(title="Curva de Equity", height=400)
-            st.plotly_chart(fig_eq, use_container_width=True)
-
-        st.subheader("Trades")
-        st.dataframe(result["trades"], use_container_width=True)
-
-# --- TAB 3: Rules-Guard ---
-with tab3:
-    if "backtest_result" in st.session_state:
-        result = st.session_state["backtest_result"]
-        verdict = rules_guard_evaluate(result["daily_pnl"], result["trades"])
-
-        color = {"PASS": "[PASS]", "PASS_WITH_WARNING": "[WARNING]", "FAIL": "[FAIL]"}[verdict["verdict"]]
-        st.header(f"{color} Veredicto: {verdict['verdict']}")
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Peor dia", f"${verdict['worst_day_usd']}")
-        col2.metric("Max. perdidas seguidas", verdict["max_consecutive_losses"])
-        col3.metric("% sesiones sobrevividas", f"{verdict['sessions_survived_pct']}%")
-
-        if verdict["breach_events"]:
-            st.subheader("Eventos de ruptura de reglas")
-            st.dataframe(pd.DataFrame(verdict["breach_events"]), use_container_width=True)
-    else:
-        st.info("Corre primero un backtest en la pestana anterior.")
+        st.info("No hay datos live disponibles todavía.")
