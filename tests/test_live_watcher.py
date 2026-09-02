@@ -34,6 +34,29 @@ class LiveWatcherTests(unittest.TestCase):
         self.assertGreater(signal["entry_price"], 0)
         self.assertGreater(signal["target_price"], signal["entry_price"])
 
+    def test_build_signal_works_for_recent_trend_not_strictly_monotonic(self):
+        strategy = {
+            "strategy_id": "nas100_ob_choch_v1",
+            "risk_amount_usd": 100,
+            "account_size": 10000,
+            "reward_to_risk": {"fixed": 3.0},
+        }
+        candles = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=8, freq="min"),
+                "open": [99.8, 101.1, 99.5, 100.8, 98.5, 100.1, 99.2, 100.9],
+                "high": [100.6, 101.8, 100.1, 101.4, 99.7, 101.3, 100.4, 102.4],
+                "low": [99.2, 100.4, 98.6, 99.4, 97.9, 99.5, 98.7, 100.1],
+                "close": [100.2, 101.4, 99.7, 100.5, 98.9, 100.6, 99.8, 101.2],
+                "volume": [10, 11, 9, 12, 8, 11, 10, 13],
+            }
+        )
+
+        signal = build_signal_from_recent_candles(strategy, candles)
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal["direction"], "bullish")
+
     def test_log_signal_writes_csv(self):
         signal = {
             "strategy_id": "nas100_ob_choch_v1",

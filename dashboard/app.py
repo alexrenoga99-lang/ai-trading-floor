@@ -59,8 +59,85 @@ def _ensure_env_loaded() -> None:
 _ensure_env_loaded()
 
 st.set_page_config(page_title="AI Trading Floor", layout="wide")
-st.title("AI Trading Floor - Dashboard")
-st.caption("Actualización en tiempo real: cada 15 segundos para evitar rate limit de Capital.com")
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: linear-gradient(180deg, #07111f 0%, #0f172a 100%);
+    }
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+    }
+    .title-box {
+        background: rgba(15, 23, 42, 0.85);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 14px;
+        padding: 1rem 1.25rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 10px 25px rgba(15, 23, 42, 0.25);
+    }
+    .status-card {
+        background: rgba(15, 23, 42, 0.8);
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 12px;
+        padding: 0.9rem 1rem;
+        min-height: 110px;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.20);
+    }
+    .status-label {
+        font-size: 0.74rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #94a3b8;
+        margin-bottom: 0.4rem;
+    }
+    .status-value {
+        font-size: 1.3rem;
+        font-weight: 700;
+        color: #e2e8f0;
+    }
+    .status-pill {
+        display: inline-block;
+        padding: 0.25rem 0.6rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        background: rgba(34, 197, 94, 0.15);
+        color: #86efac;
+        border: 1px solid rgba(34, 197, 94, 0.35);
+    }
+    .signal-pill {
+        display: inline-block;
+        padding: 0.28rem 0.7rem;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+    .signal-bullish {
+        background: rgba(16, 185, 129, 0.15);
+        color: #6ee7b7;
+        border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .signal-bearish {
+        background: rgba(239, 68, 68, 0.15);
+        color: #fca5a5;
+        border: 1px solid rgba(239, 68, 68, 0.35);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="title-box">
+      <h1 style="margin:0; color:#f8fafc;">AI Trading Floor - Dashboard</h1>
+      <div style="color:#94a3b8; margin-top:0.4rem; font-size:0.96rem;">Actualización en tiempo real: cada 15 segundos para evitar rate limit de Capital.com</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 st_autorefresh(interval=15000, key="live_refresh")
 
 # --- Selector de estrategia ---
@@ -125,6 +202,77 @@ st.subheader(f"Precio live · {selected_timeframe}")
 if live_data:
     df = live_data["df"]
     signal = build_signal_from_recent_candles(strategy, df, timeframe=selected_timeframe)
+    last_close = float(df["close"].iloc[-1])
+    current_price = float(live_data["current_price"])
+    signal_label = signal["direction"].title() if signal else "Sin señal"
+    signal_class = "signal-bullish" if signal and signal["direction"] == "bullish" else "signal-bearish" if signal else ""
+
+    status_cols = st.columns(4)
+    with status_cols[0]:
+        st.markdown(
+            """
+            <div class="status-card">
+                <div class="status-label">Mercado</div>
+                <div class="status-value">Capital.com</div>
+                <div class="status-pill">Live</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with status_cols[1]:
+        st.markdown(
+            """
+            <div class="status-card">
+                <div class="status-label">Timeframe</div>
+                <div class="status-value">{timeframe}</div>
+                <div class="status-pill">{resolution}</div>
+            </div>
+            """.format(timeframe=selected_timeframe, resolution=selected_resolution),
+            unsafe_allow_html=True,
+        )
+    with status_cols[2]:
+        st.markdown(
+            """
+            <div class="status-card">
+                <div class="status-label">Último cierre</div>
+                <div class="status-value">{price:.2f}</div>
+                <div class="status-pill">{epic}</div>
+            </div>
+            """.format(price=last_close, epic=live_data["epic"]),
+            unsafe_allow_html=True,
+        )
+    with status_cols[3]:
+        if signal:
+            st.markdown(
+                """
+                <div class="status-card">
+                    <div class="status-label">Señal</div>
+                    <div class="status-value">{direction}</div>
+                    <div class="signal-pill {class_name}">{entry}</div>
+                </div>
+                """.format(direction=signal_label, entry=f"Entrada {signal['entry_price']:.2f}", class_name="signal-bullish" if signal["direction"] == "bullish" else "signal-bearish"),
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """
+                <div class="status-card">
+                    <div class="status-label">Señal</div>
+                    <div class="status-value">No hay señal</div>
+                    <div class="status-pill">Esperando</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    metric_cols = st.columns(3)
+    with metric_cols[0]:
+        st.metric("Precio actual", f"{current_price:.2f}")
+    with metric_cols[1]:
+        st.metric("Último cierre", f"{last_close:.2f}")
+    with metric_cols[2]:
+        st.metric("Estrategia", selected)
+
     fig = go.Figure(data=[go.Candlestick(
         x=df["timestamp"],
         open=df["open"],
@@ -151,15 +299,25 @@ if live_data:
         st.caption(
             f"Señal: {signal['direction']} | timeframe={signal.get('timeframe')} | entrada {signal['entry_price']} | stop {signal['stop_price']} | target {signal['target_price']}"
         )
+        if st.button("Enviar señal al Telegram"):
+            try:
+                result = send_signal_alert(signal)
+                st.success(f"Señal enviada a Telegram: {result.get('ok', True)}")
+            except Exception as exc:
+                st.error(f"No se pudo enviar la señal: {exc}")
 
     fig.update_layout(
-        height=500,
+        height=520,
         margin=dict(l=10, r=10, t=10, b=10),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        paper_bgcolor="#0f172a",
+        plot_bgcolor="#0f172a",
+        font=dict(color="#e2e8f0"),
+        xaxis=dict(showgrid=False, tickfont=dict(color="#cbd5e1")),
+        yaxis=dict(showgrid=True, gridcolor="rgba(148, 163, 184, 0.18)", tickfont=dict(color="#cbd5e1")),
     )
     st.plotly_chart(fig, use_container_width=True)
-    st.metric("Último cierre del timeframe", f"{live_data['current_price']:.2f}")
     st.caption("Importante: el precio del watcher y del dashboard se basan en el último cierre del timeframe elegido, no en el último tick instantáneo del mercado.")
 else:
     if st.session_state.get("live_data_error"):

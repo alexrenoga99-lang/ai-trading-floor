@@ -1,0 +1,3 @@
+strategy_id,direction,entry_price,stop_price,target_price,position_size,timestamp
+nas100_ob_choch_v1,bullish,29094.1,29086.1,29129.5,8.474576,2026-09-02T03:41:37.437428+00:00
+nas100_ob_choch_v1,bullish,29095.8,29092.3,29114.7,15.873016,2026-09-02T03:42:28.039857+00:00

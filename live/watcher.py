@@ -31,8 +31,20 @@ def build_signal_from_recent_candles(strategy: Dict[str, Any], candles: pd.DataF
     prev = df.iloc[-2]
     prev2 = df.iloc[-3]
 
-    bullish_bias = last["close"] > prev["close"] > prev2["close"]
-    bearish_bias = last["close"] < prev["close"] < prev2["close"]
+    recent_close_window = df["close"].tail(5).astype(float)
+    recent_average = float(recent_close_window.mean())
+    recent_slope = float(recent_close_window.iloc[-1] - recent_close_window.iloc[0])
+
+    bullish_bias = (
+        float(last["close"]) > float(prev["close"]) and
+        float(last["close"]) > recent_average and
+        recent_slope > 0
+    )
+    bearish_bias = (
+        float(last["close"]) < float(prev["close"]) and
+        float(last["close"]) < recent_average and
+        recent_slope < 0
+    )
 
     if not (bullish_bias or bearish_bias):
         return None
