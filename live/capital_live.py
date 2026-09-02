@@ -83,6 +83,7 @@ def _get_valid_session() -> dict:
 
 def fetch_recent_candles(epic: str = "US100", resolution: str = "HOUR", hours: int = 24, max_points: int = 200) -> dict:
     config = _load_env_and_validate()
+    max_points = max(int(max_points), 3000 if hours >= 2160 else 200)
     session = _get_valid_session()
     headers = {
         "X-CAP-API-KEY": config["api_key"],

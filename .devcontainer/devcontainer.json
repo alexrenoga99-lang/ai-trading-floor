@@ -1,0 +1,5 @@
+{
+  "name": "ai-trading-floor",
+  "postAttachCommand": "bash ./scripts/start_live_services.sh",
+  "postStartCommand": "bash ./scripts/start_live_services.sh"
+}

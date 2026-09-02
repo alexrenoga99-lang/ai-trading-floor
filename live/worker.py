@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from live.capital_live import fetch_recent_candles
-from live.watcher import build_signal_from_recent_candles, publish_signal
+from live.watcher import build_signal_from_recent_candles, publish_signal, should_emit_signal
 
 
 def _load_strategy(path: str | Path) -> dict:
@@ -55,20 +56,37 @@ def _resolve_timeframe(timeframe: str) -> tuple[str, int]:
         "1m": ("MINUTE", 12),
         "5m": ("MINUTE_5", 24),
         "15m": ("MINUTE_15", 48),
-        "1h": ("HOUR", 72),
-        "4h": ("HOUR_4", 168),
-        "1d": ("DAY", 720),
+        "1h": ("HOUR", 2160),
+        "4h": ("HOUR_4", 2160),
+        "1d": ("DAY", 2160),
     }
     if timeframe not in mapping:
         raise ValueError(f"Timeframe no soportado: {timeframe}")
     return mapping[timeframe]
 
 
+def _build_macro_context(epic: str) -> dict:
+    """Carga historial macro suficiente para que la zona tenga sentido en 3 meses."""
+    context = {}
+    for tf_name, (resolution, hours) in {
+        "1h": ("HOUR", 2160),
+        "4h": ("HOUR_4", 2160),
+        "1d": ("DAY", 2160),
+    }.items():
+        try:
+            data = fetch_recent_candles(epic=epic, resolution=resolution, hours=hours, max_points=3000)
+            context[tf_name] = data["df"]
+        except Exception as exc:  # pragma: no cover - worker runtime guard
+            print(f"[MACRO_WARN] {tf_name}: {type(exc).__name__}: {exc}")
+    return context
+
+
 def run_worker(epic: str = "US100", timeframe: str = "1m", interval_seconds: int = 15) -> None:
     _load_env_local()
     strategy = _load_strategy(Path(__file__).resolve().parents[1] / "strategies" / "nas100_ob_choch_v1.json")
     resolution, hours = _resolve_timeframe(timeframe)
-    last_signature = None
+    last_signal_time = None
+    cooldown_minutes = int(strategy.get("signal_config", {}).get("cooldown_minutes", 15))
 
     print(f"Worker live iniciado: epic={epic} timeframe={timeframe} interval={interval_seconds}s")
     while True:
@@ -77,23 +95,18 @@ def run_worker(epic: str = "US100", timeframe: str = "1m", interval_seconds: int
                 epic=epic,
                 resolution=resolution,
                 hours=hours,
-                max_points=200,
+                max_points=2000,
             )
-            signal = build_signal_from_recent_candles(strategy, data["df"], timeframe=timeframe)
+            macro_context = _build_macro_context(epic) if timeframe in {"1m", "5m"} else {}
+            signal = build_signal_from_recent_candles(strategy, data["df"], timeframe=timeframe, macro_context=macro_context)
 
             if signal:
-                signature = (
-                    signal["direction"],
-                    round(float(signal["entry_price"]), 5),
-                    round(float(signal["stop_price"]), 5),
-                    round(float(signal["target_price"]), 5),
-                )
-                if signature != last_signature:
-                    result = publish_signal(strategy, data["df"], timeframe=timeframe)
+                if should_emit_signal(signal, last_signal_time, cooldown_minutes=cooldown_minutes):
+                    result = publish_signal(strategy, data["df"], timeframe=timeframe, macro_context=macro_context)
                     print(f"[ALERTA] {signal['direction']} entry={signal['entry_price']} stop={signal['stop_price']} target={signal['target_price']} -> {result}")
-                    last_signature = signature
+                    last_signal_time = datetime.now(timezone.utc)
                 else:
-                    print(f"[REPETIDA] {signal['direction']} entry={signal['entry_price']} stop={signal['stop_price']} target={signal['target_price']}")
+                    print(f"[COOLDOWN] {signal['direction']} entry={signal['entry_price']} stop={signal['stop_price']} target={signal['target_price']}")
             else:
                 print(f"[SIN_SEÑAL] {data['epic']} @ {timeframe} {data['current_price']}")
         except Exception as exc:  # pragma: no cover - runtime worker loop

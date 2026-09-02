@@ -1,8 +1,10 @@
 {
   "strategy_id": "nas100_ob_choch_v1",
+  "version": "v2_live_refined",
   "name": "Order Block + CHoCH/BOS Estructural (NAS100)",
   "instrument": "NAS100",
   "instrument_alt": ["XAUUSD"],
+  "status": "active_live",
   "session_window": {
     "start": "00:00",
     "end": "23:59",
@@ -10,8 +12,19 @@
     "notes": "Corre las 24 horas del día, sin filtro de sesión. Todas las ventanas horarias son válidas para buscar setups."
   },
   "timeframes": {
-    "structure_tf": ["1H", "4H"],
+    "structure_tf": ["4H"],
     "trigger_tf": ["1m", "5m"]
+  },
+  "signal_config": {
+    "lookback_bars": 5,
+    "min_trend_strength_pct": 0.0002,
+    "liquidity_zone_tolerance": 0.003,
+    "require_1m_5m_alignment": true,
+    "min_rr": 3.0,
+    "macro_zone_history_hours": 2160,
+    "require_macro_zone_history": true,
+    "cooldown_minutes": 15,
+    "notes": "Configuración más conservadora para live: exige una zona macro validada en un historial mínimo de 90 días y alineación 1m/5m; no se dispara solo por cambiar de timeframe."
   },
   "entry_rules": [
     "PASO 1 (Estructura, TF 1H/4H): Identificar un Order Block (OB) como la última vela bajista antes de un impulso alcista fuerte (OB alcista) o la última vela alcista antes de un impulso bajista fuerte (OB bajista).",
@@ -34,13 +47,13 @@
     "breakeven_rule": "Mover el stop a Break Even (precio de entrada) apenas se forme un CHoCH/BOS menor a favor del trade en el MISMO timeframe de entrada (1m/5m), inmediatamente al cierre de la vela que confirma ese quiebre menor.",
     "notes": "Esto protege la operación ante un retroceso después de la entrada, antes de alcanzar el target final de 3:1."
   },
-  "risk_per_trade_pct": 1.0,
-  "risk_amount_usd": 100,
+  "risk_per_trade_pct": 0.75,
+  "risk_amount_usd": 75,
   "account_size": 10000,
   "filters": [
     "El OB debe estar precedido por un impulso claro (evitar OBs dentro de rangos laterales sin desplazamiento fuerte).",
     "OBLIGATORIO: solo se opera el OB si está virgen (nunca antes mitigado). Un solo toque previo invalida la zona para siempre."
   ],
-  "max_trades_per_day": 3,
-  "notes": "Estrategia 1 (única por ahora, en espera de futuras estrategias 2 y 3 para portafolio). Basada en Smart Money Concepts (Order Blocks vírgenes + BOS/CHoCH multi-timeframe), corre 24h, RR fijo 3:1, gestión de BE por mini-quiebre en TF de entrada."
+  "max_trades_per_day": 2,
+  "notes": "Versión v2 live refinada: más conservadora y orientada a evitar ruido. Sigue basada en Smart Money Concepts, corre 24h, RR fijo 3:1 y gestión de BE por mini-quiebre en TF de entrada."
 }
